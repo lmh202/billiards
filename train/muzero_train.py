@@ -81,7 +81,7 @@ class MuZeroConfig:
         self.self_play_games = 100  # 每次迭代的自我对弈局数
         
         # 保存和日志
-        self.checkpoint_interval = 10  # 保存间隔
+        self.checkpoint_interval = 1  # 保存间隔
         self.save_dir = "checkpoints"
         
         # 策略平滑，避免早期动作概率塌缩
@@ -871,6 +871,8 @@ def main():
             
             if training_step % 10 == 0:
                 print(f"  训练步数: {training_step}, 损失: {loss:.4f}")
+                with open("train.txt", "a", encoding="utf-8") as f:
+                    f.write(f"训练步数: {training_step}, 损失: {loss:.4f}\n")
         
         # 保存检查点
         if (iteration + 1) % config.checkpoint_interval == 0:
