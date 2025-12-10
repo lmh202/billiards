@@ -1,0 +1,15 @@
+# MuZero训练依赖包
+
+# 深度学习框架
+torch>=2.0.0
+torchvision>=0.15.0
+
+# 数值计算
+numpy>=1.24.0
+
+# 其他依赖（如果需要）
+# scipy>=1.10.0
+
+# 注意：以下包应该已经在billiards环境中安装
+# - pooltool（通过poetry安装）
+# - bayesian-optimization（用于BasicAgent）
