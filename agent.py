@@ -323,18 +323,184 @@ class BasicAgent(Agent):
             return self._random_action()
 
 class NewAgent(Agent):
-    """自定义 Agent 模板（待学生实现）"""
+    """基于PPO强化学习的智能 Agent"""
     
-    def __init__(self):
-        pass
+    def __init__(self, checkpoint_path: str = None):
+        """
+        初始化Agent
+        
+        参数:
+            checkpoint_path: 训练好的模型检查点路径
+                            默认为 './train/checkpoints/final_model.pt'
+        """
+        super().__init__()
+        
+        import torch
+        import numpy as np
+        
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # 默认检查点路径
+        if checkpoint_path is None:
+            checkpoint_path = os.path.join(
+                os.path.dirname(__file__), 
+                'train', 'checkpoints', 'final_model.pt'
+            )
+        
+        # 球ID映射
+        self.ball_ids = ['cue'] + [str(i) for i in range(1, 16)]
+        self.ball_id_to_idx = {bid: i for i, bid in enumerate(self.ball_ids)}
+        self.pocket_ids = ['lb', 'lc', 'lt', 'rb', 'rc', 'rt']
+        
+        # 加载模型
+        self.policy = None
+        if os.path.exists(checkpoint_path):
+            try:
+                from train.networks import PPOActorCritic
+                from train.config import NETWORK_CONFIG
+                
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                network_config = checkpoint.get('network_config', NETWORK_CONFIG)
+                
+                self.policy = PPOActorCritic(network_config).to(self.device)
+                self.policy.load_state_dict(checkpoint['policy_state_dict'])
+                self.policy.eval()
+                
+                print(f"[NewAgent] PPO模型已加载: {checkpoint_path}")
+            except Exception as e:
+                print(f"[NewAgent] 加载模型失败: {e}, 将使用随机策略")
+                self.policy = None
+        else:
+            print(f"[NewAgent] 未找到模型文件: {checkpoint_path}, 将使用随机策略")
+            
+    def _get_observation(self, balls, my_targets, table):
+        """
+        将环境观测转换为网络输入格式
+        """
+        import torch
+        import numpy as np
+        
+        max_balls = 16
+        
+        # 1. 球特征 [max_balls, 7]
+        ball_features = np.zeros((max_balls, 7), dtype=np.float32)
+        ball_mask = np.zeros(max_balls, dtype=np.bool_)
+        
+        for bid, ball in balls.items():
+            if bid not in self.ball_id_to_idx:
+                continue
+            idx = self.ball_id_to_idx[bid]
+            
+            # 位置 (归一化)
+            pos = ball.state.rvw[0]
+            ball_features[idx, 0] = pos[0] / table.l
+            ball_features[idx, 1] = pos[1] / table.w
+            ball_features[idx, 2] = pos[2]
+            
+            # 速度 (归一化)
+            vel = ball.state.rvw[1]
+            ball_features[idx, 3] = vel[0] / 10.0
+            ball_features[idx, 4] = vel[1] / 10.0
+            ball_features[idx, 5] = vel[2] / 10.0
+            
+            # 是否进袋
+            ball_features[idx, 6] = 1.0 if ball.state.s == 4 else 0.0
+            ball_mask[idx] = (ball.state.s != 4)
+            
+        ball_mask[0] = True  # 白球始终有效
+        
+        # 2. 球袋特征 [6*3]
+        pocket_features = np.zeros(6 * 3, dtype=np.float32)
+        for i, pid in enumerate(self.pocket_ids):
+            if pid in table.pockets:
+                center = table.pockets[pid].center
+                pocket_features[i*3] = center[0] / table.l
+                pocket_features[i*3 + 1] = center[1] / table.w
+                pocket_features[i*3 + 2] = center[2]
+                
+        # 3. 目标球mask [max_balls]
+        target_mask = np.zeros(max_balls, dtype=np.float32)
+        remaining_targets = [bid for bid in my_targets if balls[bid].state.s != 4]
+        
+        if len(remaining_targets) == 0:
+            # 目标球清空，瞄准8号球
+            target_mask[self.ball_id_to_idx['8']] = 1.0
+        else:
+            for bid in remaining_targets:
+                target_mask[self.ball_id_to_idx[bid]] = 1.0
+                
+        # 4. 游戏状态 [4]
+        own_remaining = len(remaining_targets)
+        is_targeting_8 = 1.0 if own_remaining == 0 else 0.0
+        
+        game_state = np.array([
+            own_remaining / 7.0,
+            0.5,  # 对手信息在评估时未知，使用默认值
+            is_targeting_8,
+            0.5   # hit_count未知
+        ], dtype=np.float32)
+        
+        return {
+            'ball_features': torch.from_numpy(ball_features).unsqueeze(0).to(self.device),
+            'ball_mask': torch.from_numpy(ball_mask).unsqueeze(0).to(self.device),
+            'pocket_features': torch.from_numpy(pocket_features).unsqueeze(0).to(self.device),
+            'target_mask': torch.from_numpy(target_mask).unsqueeze(0).to(self.device),
+            'game_state': torch.from_numpy(game_state).unsqueeze(0).to(self.device)
+        }
     
     def decision(self, balls=None, my_targets=None, table=None):
-        """决策方法
+        """
+        决策方法 - 使用PPO策略网络进行决策
         
         参数：
-            observation: (balls, my_targets, table)
+            balls: 球状态字典，{ball_id: Ball}
+            my_targets: 目标球ID列表，['1', '2', ...]
+            table: 球桌对象
         
         返回：
             dict: {'V0', 'phi', 'theta', 'a', 'b'}
         """
-        return self._random_action()
+        import torch
+        
+        if balls is None:
+            print("[NewAgent] 未收到balls信息，使用随机动作")
+            return self._random_action()
+            
+        # 检查目标球是否清空
+        remaining_targets = [bid for bid in my_targets if balls[bid].state.s != 4]
+        if len(remaining_targets) == 0:
+            my_targets = ['8']
+            print("[NewAgent] 目标球已清空，切换到8号球")
+            
+        # 如果模型未加载，使用随机策略
+        if self.policy is None:
+            print("[NewAgent] 模型未加载，使用随机动作")
+            return self._random_action()
+            
+        try:
+            # 获取观测
+            obs = self._get_observation(balls, my_targets, table)
+            
+            # 使用策略网络决策
+            with torch.no_grad():
+                action, _, _, _ = self.policy.get_action(obs, deterministic=True)
+                action = action.cpu().numpy().squeeze()
+                
+            action_dict = {
+                'V0': float(action[0]),
+                'phi': float(action[1]),
+                'theta': float(action[2]),
+                'a': float(action[3]),
+                'b': float(action[4])
+            }
+            
+            print(f"[NewAgent] 决策: V0={action_dict['V0']:.2f}, phi={action_dict['phi']:.2f}, "
+                  f"theta={action_dict['theta']:.2f}, a={action_dict['a']:.3f}, b={action_dict['b']:.3f}")
+            
+            return action_dict
+            
+        except Exception as e:
+            print(f"[NewAgent] 决策失败: {e}, 使用随机动作")
+            import traceback
+            traceback.print_exc()
+            return self._random_action()

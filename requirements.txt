@@ -1,4 +1,4 @@
 pooltool-billiards
 numpy
 bayesian-optimization
-
+torch>=2.0.0
