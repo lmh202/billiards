@@ -505,7 +505,8 @@ if __name__ == '__main__':
     # 初始化任务环境
     env = PoolEnv()
 
-    agent_a, agent_b = BasicAgent(), NewAgent()
+    checkpoint_path = "checkpoints/muzero_checkpoint_48.pth"
+    agent_a, agent_b = BasicAgent(), NewAgent(checkpoint_path, device="cuda")
 
     env.reset(target_ball='solid') # 指定player_a打什么球
     while True:

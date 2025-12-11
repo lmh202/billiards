@@ -39,13 +39,13 @@ class MuZeroConfig:
         self.action_space_size = self.v0_bins * self.phi_bins  # 离散化动作空间大小
         self.state_channels = 32  # 状态表示的通道数
         self.hidden_state_size = 256  # 隐藏状态向量维度
-        
+
         # 网络参数
         self.encoding_size = 64  # 编码层大小
         self.fc_reward_layers = [64]  # 奖励预测层
         self.fc_value_layers = [64]  # 价值预测层
         self.fc_policy_layers = [64]  # 策略预测层
-        
+
         # MCTS参数
         self.num_simulations = 50  # MCTS模拟次数
         self.num_simulations_eval = 30  # 评估时的模拟次数
@@ -54,9 +54,9 @@ class MuZeroConfig:
         self.pb_c_init = 1.25
         self.root_dirichlet_alpha = 0.3
         self.root_exploration_fraction = 0.25
-        
+
         # 训练参数
-        self.training_steps = 2000  # 总训练步数
+        self.training_steps = 4000  # 总训练步数
         self.batch_size = 16  # 批大小
         self.num_unroll_steps = 5  # 展开步数
         self.td_steps = 10  # TD(n)步数
@@ -64,32 +64,32 @@ class MuZeroConfig:
         self.lr_decay_rate = 0.1
         self.lr_decay_steps = 5000
         self.weight_decay = 1e-4
-        
+
         # 价值和奖励的缩放（根据图片评分标准）
-        self.value_support_min = -10000
-        self.value_support_max = 110000
-        self.reward_support_min = -5000
-        self.reward_support_max = 105000
-        
+        self.value_support_min = -400
+        self.value_support_max = 400
+        self.reward_support_min = -20
+        self.reward_support_max = 20
+
         # 经验回放
-        self.replay_buffer_size = 10000
+        self.replay_buffer_size = 8000
         self.priority_alpha = 0.6  # 优先级指数
         self.priority_beta = 0.4  # 重要性采样指数
-        
+
         # 自我对弈
         self.num_actors = 1  # 并发actor数量
-        self.self_play_games = 20  # 每次迭代的自我对弈局数
-        
+        self.self_play_games = 40  # 每次迭代的自我对弈局数
+
         # 保存和日志
         self.checkpoint_interval = 1  # 保存间隔
         self.save_dir = "checkpoints"
-        
+
         # 策略平滑，避免早期动作概率塌缩
         self.policy_smoothing = 1e-3
         self.policy_uniform_mix = 0.2  # 与均匀分布混合的权重
         self.v0_uniform_mix = 0.3
         self.phi_uniform_mix = 0.1
-        
+
         # 设备
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -237,38 +237,38 @@ def calculate_muzero_reward(result, env, player):
     if done:
         # 2. 胜利奖励
         if info.get('winner') == player:
-            reward += 100000  # 完胜对手
+            reward += 15.0  # 完胜对手
             return reward
         elif info['winner'] == 'SAME':
             # 平局，根据剩余球数判断
-            return 0
+            return 0.0
         else:
             # 失败
-            reward -= 40000  # 致命犯规导致失败
+            reward -= 15.0  # 致命犯规导致失败
             return reward
     
     # 3. 进攻与推进得分
     if 'ME_INTO_POCKET' in result:
         me_pocketed = result['ME_INTO_POCKET']
-        reward += len(me_pocketed) * 1000  # 打进自己的球：+1000/颗
+        reward += len(me_pocketed) * 1.5  # 打进自己的球：+1.5/颗
     
     if 'ENEMY_INTO_POCKET' in result:
         enemy_pocketed = result['ENEMY_INTO_POCKET']
-        reward -= len(enemy_pocketed) * 500  # 打进对方球：-500/颗
+        reward -= len(enemy_pocketed) * 0.5  # 打进对方球：-0.5/颗
     
     # 4. 击球犯规
     if result.get('FOUL_FIRST_HIT'):
-        reward -= 500  # 首次犯规（首球打错）
+        reward -= 2.5  # 首次犯规（首球打错）
     
     if result.get('NO_POCKET_NO_RAIL'):
-        reward -= 200  # 本届犯规（无进球无碰库）
+        reward -= 1.5  # 本届犯规（无进球无碰库）
     
     if result.get('WHITE_BALL_INTO_POCKET'):
-        reward -= 40000  # 白球进袋是致命犯规
+        reward -= 12.0  # 白球进袋是致命犯规
     
     if result.get('BLACK_BALL_INTO_POCKET') and not done:
         # 非法打进黑8（不是完胜情况）
-        reward -= 40000
+        reward -= 12.0
 
     # 5. 安全球奖励
     # 如果没有进球，也没有犯规，给予小奖励
@@ -278,7 +278,7 @@ def calculate_muzero_reward(result, env, player):
                 result.get('WHITE_BALL_INTO_POCKET'))
     
     if not has_pocket and not has_foul:
-        reward += 50  # 安全球奖励
+        reward += 0.3  # 安全球奖励
     
     return reward
 

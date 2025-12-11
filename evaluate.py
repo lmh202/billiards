@@ -27,7 +27,7 @@ results = {'AGENT_A_WIN': 0, 'AGENT_B_WIN': 0, 'SAME': 0}
 n_games = 120  # 对战局数 自己测试时可以修改 扩充为120局为了减少随机带来的扰动
 
 
-checkpoint_path = "checkpoints/muzero_checkpoint_64.pth"
+checkpoint_path = "checkpoints/muzero_checkpoint_368.pth"
 agent_a, agent_b = BasicAgent(), NewAgent(checkpoint_path, device="cuda")
 
 players = [agent_a, agent_b]  # 用于切换先后手

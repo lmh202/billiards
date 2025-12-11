@@ -419,8 +419,22 @@ class NewAgent(Agent):
             with torch.no_grad():
                 action_probs = self.mcts.run(self.network, observation, add_exploration_noise=False)
 
-            # 选择概率最高的动作
-            action_idx = int(np.argmax(action_probs))
+            # 选择概率最高的动作（在并列情况下随机打破）
+            action_probs = np.array(action_probs, dtype=np.float64)
+            if action_probs.ndim != 1 or len(action_probs) != self.config.action_space_size:
+                action_probs = np.ones(self.config.action_space_size, dtype=np.float64)
+            total = action_probs.sum()
+            if total <= 0:
+                action_probs = np.ones_like(action_probs) / len(action_probs)
+            else:
+                action_probs = action_probs / total
+
+            best_prob = action_probs.max()
+            best_actions = np.flatnonzero(np.isclose(action_probs, best_prob, rtol=1e-3, atol=1e-6))
+            if len(best_actions) > 1:
+                action_idx = int(np.random.choice(best_actions))
+            else:
+                action_idx = int(best_actions[0])
 
             # 转换为实际动作字典
             action = action_index_to_dict(action_idx, self.config)
