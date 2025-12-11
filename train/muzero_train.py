@@ -90,6 +90,11 @@ class MuZeroConfig:
         self.v0_uniform_mix = 0.3
         self.phi_uniform_mix = 0.1
 
+        # 物理模拟辅助（混合策略）
+        self.use_physics_assist = True  # 是否在 MCTS 中启用物理模拟辅助
+        self.physics_assist_samples = 15  # 对多少个候选动作进行物理模拟
+        self.physics_assist_weight = 0.5  # 物理得分在先验修正中的权重
+
         # 设备
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -203,7 +208,57 @@ def encode_state(balls, my_targets, table):
     return np.array(features, dtype=np.float32)
 
 
-def calculate_muzero_reward(result, env, player):
+def evaluate_action_with_physics(balls, my_targets, table, action_dict):
+    """使用 pooltool 物理模拟评估单个动作的得分
+    
+    参数:
+        balls: 球状态字典
+        my_targets: 目标球ID列表
+        table: 球桌对象
+        action_dict: 动作字典 {'V0', 'phi', 'theta', 'a', 'b'}
+    
+    返回:
+        float: 物理模拟得分（归一化到 [-1, 1]）
+    """
+    try:
+        import pooltool as pt
+        
+        # 深拷贝当前状态用于模拟
+        sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+        sim_table = copy.deepcopy(table)
+        cue = pt.Cue(cue_ball_id="cue")
+        
+        shot = pt.System(table=sim_table, balls=sim_balls, cue=cue)
+        shot.cue.set_state(
+            V0=action_dict['V0'],
+            phi=action_dict['phi'],
+            theta=action_dict['theta'],
+            a=action_dict['a'],
+            b=action_dict['b']
+        )
+        
+        # 执行物理模拟
+        pt.simulate(shot, inplace=True)
+        
+        # 分析结果并计算奖励（复用 analyze_shot_for_reward）
+        from agent import analyze_shot_for_reward
+        last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+        score = analyze_shot_for_reward(
+            shot=shot,
+            last_state=last_state_snapshot,
+            player_targets=my_targets
+        )
+        
+        # 归一化得分到 [-1, 1]（假设得分范围约 -150 到 +150）
+        normalized_score = np.clip(score / 150.0, -1.0, 1.0)
+        return normalized_score
+        
+    except Exception as e:
+        # 模拟失败返回较低分
+        return -0.5
+
+
+def calculate_muzero_reward(result, env, player, my_targets=None):
     """根据图片评分标准计算MuZero奖励
     
     评分标准：
@@ -216,7 +271,8 @@ def calculate_muzero_reward(result, env, player):
        - 在洗空自己球后，合法将黑8打进：完胜
     
     3. 进攻与推进得分：
-       - 打进自己的球：+1,000分（每颗）
+       - 打进瞄准的目标球：+1500分（每颗）
+       - 打进己方球但不是目标球：+200分（每颗）
        - 这是AI进攻的主要驱动力
        - 破坏（打进对方的球）：-500分（每颗）
        - 防止AI为了连续球权去破坏对手的球阵
@@ -247,10 +303,19 @@ def calculate_muzero_reward(result, env, player):
             reward -= 15.0  # 致命犯规导致失败
             return reward
     
-    # 3. 进攻与推进得分
+    # 3. 进攻与推进得分（区分瞄准球和非瞄准球）
     if 'ME_INTO_POCKET' in result:
         me_pocketed = result['ME_INTO_POCKET']
-        reward += len(me_pocketed) * 1.5  # 打进自己的球：+1.5/颗
+        if my_targets is not None:
+            # 区分瞄准球和非瞄准球
+            for ball_id in me_pocketed:
+                if ball_id in my_targets:
+                    reward += 1.5  # 打进瞄准的目标球：+1.5/颗
+                else:
+                    reward += 0.2  # 打进己方球但不是目标球：+0.2/颗
+        else:
+            # 如果没有传入目标球信息，使用默认奖励
+            reward += len(me_pocketed) * 1.5
     
     if 'ENEMY_INTO_POCKET' in result:
         enemy_pocketed = result['ENEMY_INTO_POCKET']
@@ -469,8 +534,15 @@ class MCTS:
                 return (value - self.minimum) / (self.maximum - self.minimum)
             return 0.0
         
-    def run(self, network, observation, add_exploration_noise=False):
+    def run(self, network, observation, add_exploration_noise=False, 
+            physics_context=None):
         """运行MCTS搜索
+        
+        参数:
+            network: MuZero网络
+            observation: 状态观测
+            add_exploration_noise: 是否添加探索噪声
+            physics_context: 物理模拟上下文 (balls, my_targets, table)，用于辅助评估
         
         返回: 策略分布 (action_probs)
         """
@@ -487,6 +559,30 @@ class MCTS:
             # 扩展根节点
             policy = torch.softmax(policy_logits, dim=-1).squeeze().cpu().numpy()
             
+            # 物理模拟辅助：对部分候选动作进行物理评估
+            if self.config.use_physics_assist and physics_context is not None:
+                balls, my_targets, table = physics_context
+                
+                # 选择概率最高的N个动作进行物理模拟
+                n_samples = min(self.config.physics_assist_samples, self.config.action_space_size)
+                top_actions = np.argsort(policy)[-n_samples:]
+                
+                physics_scores = np.zeros(self.config.action_space_size)
+                for action_idx in top_actions:
+                    action_dict = action_index_to_dict(action_idx, self.config)
+                    score = evaluate_action_with_physics(balls, my_targets, table, action_dict)
+                    physics_scores[action_idx] = score
+                
+                # 用物理得分修正先验概率
+                # 将物理得分归一化并与原策略混合
+                physics_scores_normalized = physics_scores - physics_scores.min()
+                if physics_scores_normalized.max() > 0:
+                    physics_scores_normalized /= physics_scores_normalized.max()
+                
+                weight = self.config.physics_assist_weight
+                policy = (1 - weight) * policy + weight * physics_scores_normalized
+                policy = policy / policy.sum()
+            
             # 添加Dirichlet噪声用于探索
             if add_exploration_noise:
                 noise = np.random.dirichlet([self.config.root_dirichlet_alpha] * self.config.action_space_size)
@@ -495,6 +591,7 @@ class MCTS:
             
             for action_idx in range(self.config.action_space_size):
                 root.children[action_idx] = Node(policy[action_idx])
+
         
         # 运行模拟
         for _ in range(self.config.num_simulations):
@@ -694,8 +791,11 @@ def play_game(config, network, env, train_mode=True):
         # 编码状态
         observation = encode_state(balls, my_targets, table)
         
-        # 运行MCTS
-        action_probs = mcts.run(network, observation, add_exploration_noise=train_mode)
+        # 运行MCTS（传递物理上下文用于辅助）
+        physics_context = (balls, my_targets, table) if train_mode else None
+        action_probs = mcts.run(network, observation, 
+                               add_exploration_noise=train_mode,
+                               physics_context=physics_context)
         
         # 选择动作
         if train_mode:
@@ -712,8 +812,8 @@ def play_game(config, network, env, train_mode=True):
         last_state = save_balls_state(balls)
         result = env.take_shot(action)
         
-        # 计算奖励（根据图片评分标准）
-        reward = calculate_muzero_reward(result, env, player)
+        # 计算奖励（根据图片评分标准，传入目标球信息）
+        reward = calculate_muzero_reward(result, env, player, my_targets)
         
         # 存储转换
         game_history.store_transition(observation, action_idx, reward, action_probs, 0.0)

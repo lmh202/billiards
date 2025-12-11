@@ -14,6 +14,13 @@ poolenv.py - 台球环境模块（不能修改）
 """
 
 import math
+
+# 先导入 sitecustomize，确保 pooltool 相关资源被准备好
+try:  # pragma: no cover - 安全导入
+    import sitecustomize  # pylint: disable=unused-import
+except Exception:  # noqa: BLE001
+    pass
+
 import pooltool as pt
 import numpy as np
 from pooltool.objects import PocketTableSpecs, Table, TableType
@@ -505,7 +512,7 @@ if __name__ == '__main__':
     # 初始化任务环境
     env = PoolEnv()
 
-    checkpoint_path = "checkpoints/muzero_checkpoint_48.pth"
+    checkpoint_path = "checkpoints/muzero_checkpoint_112.pth"
     agent_a, agent_b = BasicAgent(), NewAgent(checkpoint_path, device="cuda")
 
     env.reset(target_ball='solid') # 指定player_a打什么球

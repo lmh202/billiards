@@ -348,6 +348,7 @@ class NewAgent(Agent):
                 import torch
                 import torch.nn as nn
                 import torch.nn.functional as F
+                import sys
 
                 # 导入MuZero组件（从训练脚本）
                 from train.muzero_train import (
@@ -355,9 +356,26 @@ class NewAgent(Agent):
                     encode_state, action_index_to_dict
                 )
 
+                # 确保MuZero类在__main__中可见，兼容pickle的存储方式
+                main_mod = sys.modules.get('__main__')
+                if main_mod is not None:
+                    for name, obj in {
+                        'MuZeroConfig': MuZeroConfig,
+                        'MuZeroNetwork': MuZeroNetwork,
+                        'MCTS': MCTS
+                    }.items():
+                        if not hasattr(main_mod, name):
+                            setattr(main_mod, name, obj)
+
                 # 加载检查点
                 checkpoint = torch.load(checkpoint_path, map_location=self.device)
-                self.config = checkpoint.get('config', MuZeroConfig())
+                config_obj = checkpoint.get('config', None)
+                if isinstance(config_obj, dict):
+                    config = MuZeroConfig()
+                    config.__dict__.update(config_obj)
+                    self.config = config
+                else:
+                    self.config = config_obj if config_obj is not None else MuZeroConfig()
 
                 # 创建网络并加载权重
                 self.network = MuZeroNetwork(self.config)
