@@ -58,7 +58,11 @@ python train/train_ppo.py --checkpoint train/checkpoints/checkpoint_1000000.pt
 | `--gamma` | 0.99 | 折扣因子 |
 | `--clip` | 0.2 | PPO裁剪系数 |
 | `--entropy` | 0.01 | 熵正则化系数 |
-| `--save_freq` | 50,000 | 保存频率 |
+| `--log_freq` | 20,480 | 记录一次训练日志（10个迭代） |
+| `--eval_freq` | 102,400 | 触发一次评估（50个迭代） |
+| `--save_freq` | 204,800 | 保存检查点（100个迭代） |
+
+> 以上频率均为 `update_freq=2048` 的整数倍，避免整除为0导致日志/评估/保存被跳过。如果调整 `update_freq`，请同步修改这些频率。
 
 ## 评估
 

@@ -182,13 +182,15 @@ class PPOTrainer:
             'w'
         )
         
-    def collect_rollouts(self, n_steps: int):
+    def collect_rollouts(self, n_steps: int, iteration_idx: Optional[int] = None):
         """收集经验"""
         self.policy.eval()
         
         obs = self.envs.reset()
         episode_rewards_sum = np.zeros(self.num_envs)
         episode_lengths_count = np.zeros(self.num_envs)
+        iteration_reward_accum = 0.0
+        iteration_label = (iteration_idx + 1) if iteration_idx is not None else (self.total_timesteps // self.config['update_freq']) + 1
         
         for step in range(n_steps):
             with torch.no_grad():
@@ -197,6 +199,13 @@ class PPOTrainer:
                 
             action_np = action.cpu().numpy()
             next_obs, rewards, dones, infos = self.envs.step(action_np)
+            step_reward_sum = float(np.sum(rewards))
+            iteration_reward_accum += step_reward_sum
+            step_label = step + 1
+            print(
+                f"[Rollout] 迭代 {iteration_label:04d} | 回合 {step_label:03d}/{n_steps:03d} | "
+                f"本回合奖励 {step_reward_sum:.2f} | 周期累计 {iteration_reward_accum:.2f}"
+            )
             
             # 添加到缓冲区
             self.buffer.add(obs, action, log_prob, rewards, dones, value)
@@ -322,7 +331,7 @@ class PPOTrainer:
         
         for iteration in range(n_iterations):
             # 收集经验
-            self.collect_rollouts(n_steps)
+            self.collect_rollouts(n_steps, iteration_idx=iteration)
             
             # 更新策略
             losses = self.update()

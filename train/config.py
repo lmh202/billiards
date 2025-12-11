@@ -53,14 +53,15 @@ PPO_CONFIG = {
 
 # ============ 训练配置 ============
 TRAIN_CONFIG = {
-    'total_timesteps': 2_000_000,   # 总训练步数
-    'num_envs': 8,                  # 并行环境数量
-    'save_freq': 50_000,            # 保存频率
-    'eval_freq': 10_000,            # 评估频率
-    'eval_episodes': 20,            # 评估局数
-    'log_freq': 1000,               # 日志频率
+    'total_timesteps': 2_000_000,     # 总训练步数
+    'num_envs': 8,                    # 并行环境数量
+    # 下列频率均为update_freq(2048)的整数倍，避免训练循环取整后为0
+    'log_freq': 20_480,               # 10个迭代记录一次（约1万步）
+    'eval_freq': 102_400,             # 50个迭代评估一次
+    'save_freq': 204_800,             # 100个迭代保存一次
+    'eval_episodes': 20,              # 评估局数
     'checkpoint_dir': './train/checkpoints',  # 检查点目录
-    'log_dir': './train/logs',      # 日志目录
+    'log_dir': './train/logs',        # 日志目录
 }
 
 # ============ 奖励配置 ============
