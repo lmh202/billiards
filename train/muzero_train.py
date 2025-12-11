@@ -56,8 +56,8 @@ class MuZeroConfig:
         self.root_exploration_fraction = 0.25
         
         # 训练参数
-        self.training_steps = 10000  # 总训练步数
-        self.batch_size = 64  # 批大小
+        self.training_steps = 2000  # 总训练步数
+        self.batch_size = 16  # 批大小
         self.num_unroll_steps = 5  # 展开步数
         self.td_steps = 10  # TD(n)步数
         self.lr_init = 0.001  # 初始学习率
@@ -78,7 +78,7 @@ class MuZeroConfig:
         
         # 自我对弈
         self.num_actors = 1  # 并发actor数量
-        self.self_play_games = 100  # 每次迭代的自我对弈局数
+        self.self_play_games = 20  # 每次迭代的自我对弈局数
         
         # 保存和日志
         self.checkpoint_interval = 1  # 保存间隔
@@ -864,6 +864,7 @@ def main():
         for _ in range(config.batch_size):
             batch = replay_buffer.sample_batch()
             if batch is None:
+                print("None")
                 continue
             
             loss = train_network(config, network, optimizer, batch, training_step)

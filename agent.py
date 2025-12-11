@@ -330,7 +330,7 @@ class BasicAgent(Agent):
 class NewAgent(Agent):
     """使用MuZero算法的智能Agent"""
     
-    def __init__(self, checkpoint_path=None):
+    def __init__(self, checkpoint_path=None, device="cpu"):
         """初始化MuZero Agent
         
         参数：
@@ -338,38 +338,39 @@ class NewAgent(Agent):
         """
         super().__init__()
         self.checkpoint_path = checkpoint_path
+        self.device = device
         self.network = None
         self.config = None
         self.mcts = None
-        
         # 尝试加载模型
         if checkpoint_path is not None and os.path.exists(checkpoint_path):
             try:
                 import torch
                 import torch.nn as nn
                 import torch.nn.functional as F
-                
+
                 # 导入MuZero组件（从训练脚本）
                 from train.muzero_train import (
                     MuZeroConfig, MuZeroNetwork, MCTS, 
                     encode_state, action_index_to_dict
                 )
-                
+
                 # 加载检查点
-                checkpoint = torch.load(checkpoint_path, map_location='cpu')
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
                 self.config = checkpoint.get('config', MuZeroConfig())
-                
+
                 # 创建网络并加载权重
                 self.network = MuZeroNetwork(self.config)
                 self.network.load_state_dict(checkpoint['network_state_dict'])
                 self.network.eval()
-                
+                self.network.to(self.device)
+
                 # 创建MCTS
                 self.mcts = MCTS(self.config)
-                
+
                 print(f"[NewAgent] 成功加载MuZero模型: {checkpoint_path}")
                 print(f"[NewAgent] 训练步数: {checkpoint.get('training_step', 'unknown')}")
-                
+
             except Exception as e:
                 print(f"[NewAgent] 加载模型失败: {e}")
                 print(f"[NewAgent] 将使用随机策略")
@@ -410,20 +411,23 @@ class NewAgent(Agent):
             
             # 编码状态
             observation = encode_state(balls, my_targets, table)
-            
+            import torch
+            if isinstance(observation, torch.Tensor):
+                observation = observation.to(self.device)
+
             # 运行MCTS（评估模式，不添加探索噪声）
             with torch.no_grad():
                 action_probs = self.mcts.run(self.network, observation, add_exploration_noise=False)
-            
+
             # 选择概率最高的动作
             action_idx = int(np.argmax(action_probs))
-            
+
             # 转换为实际动作字典
             action = action_index_to_dict(action_idx, self.config)
-            
+
             print(f"[NewAgent] MuZero决策: V0={action['V0']:.2f}, phi={action['phi']:.2f}, "
                   f"theta={action['theta']:.2f}, a={action['a']:.3f}, b={action['b']:.3f}")
-            
+
             return action
             
         except Exception as e:
