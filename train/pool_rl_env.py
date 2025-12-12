@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import copy
 import pooltool as pt
+import concurrent.futures
 from typing import Dict, Tuple, List, Optional, Any
 
 import sys
@@ -32,7 +33,8 @@ class PoolRLEnv:
                  opponent_type: str = 'self',  # 'self', 'random', 'basic'
                  enable_noise: bool = True,
                  reward_config: dict = REWARD_CONFIG,
-                 device: str = 'cpu'):
+                 device: str = 'cpu',
+                 two_ball_mode: bool = False):
         """
         Args:
             opponent_type: 对手类型
@@ -43,8 +45,14 @@ class PoolRLEnv:
             reward_config: 奖励配置
             device: 设备
         """
-        self.env = PoolEnv()
-        self.env.enable_noise = enable_noise
+        self.two_ball_mode = two_ball_mode
+        if not self.two_ball_mode:
+            self.env = PoolEnv()
+            self.env.enable_noise = enable_noise
+        else:
+            # two-ball simplified environment (used for phase-1 pretraining)
+            self.env = None
+            self.enable_noise = enable_noise
         
         self.opponent_type = opponent_type
         self.reward_config = reward_config
@@ -81,21 +89,67 @@ class PoolRLEnv:
         Returns:
             observation: 观测字典
         """
-        if target_ball is None:
-            target_ball = np.random.choice(['solid', 'stripe'])
-            
-        self.env.reset(target_ball=target_ball)
-        
-        # 随机选择智能体扮演哪一方
-        self.agent_player = np.random.choice(['A', 'B'])
-        
-        # 如果智能体是后手，让对手先行动直到轮到智能体
-        while self.env.get_curr_player() != self.agent_player:
-            if self._check_done():
-                # 对手已经结束游戏
-                break
-            self._opponent_step()
-            
+        if not self.two_ball_mode:
+            if target_ball is None:
+                target_ball = np.random.choice(['solid', 'stripe'])
+
+            self.env.reset(target_ball=target_ball)
+
+            # 随机选择智能体扮演哪一方
+            self.agent_player = np.random.choice(['A', 'B'])
+
+            # 如果智能体是后手，让对手先行动直到轮到智能体
+            while self.env.get_curr_player() != self.agent_player:
+                if self._check_done():
+                    # 对手已经结束游戏
+                    break
+                self._opponent_step()
+
+            return self._get_observation()
+
+        # === two-ball mode ===
+        # Create a fresh simple table and two balls (cue + target)
+        table = pt.Table.default()
+        R = pt.objects.BallParams().R
+
+        # helper to sample a valid position (away from pockets and edges)
+        def sample_pos():
+            margin_x = 0.2 + R
+            margin_y = 0.2 + R
+            for _ in range(100):
+                x = np.random.uniform(-table.l/2 + margin_x, table.l/2 - margin_x)
+                y = np.random.uniform(-table.w/2 + margin_y, table.w/2 - margin_y)
+                pos = np.array([x, y])
+                # ensure not too close to any pocket
+                dists = [np.linalg.norm(pos - np.array(table.pockets[pid].center[:2])) for pid in table.pockets]
+                if min(dists) > 0.2:
+                    return [x, y]
+            return [0.0, 0.0]
+
+        cue_xy = sample_pos()
+        target_xy = sample_pos()
+        # ensure separation
+        if np.linalg.norm(np.array(cue_xy) - np.array(target_xy)) < 2 * R + 0.05:
+            target_xy[0] += (2 * R + 0.1)
+
+        cue_ball = pt.objects.Ball.create('cue', xy=cue_xy)
+        # 随机选择一个非黑8的普通球 (1-7 或 9-15)
+        valid_target_ids = [str(i) for i in range(1, 8)] + [str(i) for i in range(9, 16)]
+        target_ball_id = np.random.choice(valid_target_ids)
+        target_ball = pt.objects.Ball.create(target_ball_id, xy=target_xy)
+
+        # build balls dict and system
+        balls = {'cue': cue_ball, target_ball_id: target_ball}
+
+        self.simple_table = table
+        self.simple_balls = balls
+        self.simple_cue = pt.Cue(cue_ball_id='cue')
+        self.agent_player = 'A'
+        self.hit_count = 0
+        self.MAX_HIT_COUNT = 50
+        self.current_target_ball = target_ball_id
+        self.shot_record = pt.MultiSystem()
+
         return self._get_observation()
     
     def step(self, action: np.ndarray) -> Tuple[Dict[str, torch.Tensor], float, bool, Dict]:
@@ -112,8 +166,12 @@ class PoolRLEnv:
             info: 额外信息
         """
         # 保存击球前状态用于奖励计算
-        balls_before = copy.deepcopy(self.env.balls)
-        my_targets_before = self.env.player_targets[self.agent_player].copy()
+        if not self.two_ball_mode:
+            balls_before = copy.deepcopy(self.env.balls)
+            my_targets_before = self.env.player_targets[self.agent_player].copy()
+        else:
+            balls_before = {k: v.copy() for k, v in self.simple_balls.items()}
+            my_targets_before = [self.current_target_ball]
         
         # 计算当前目标球 (用于额外奖励)
         self.current_target_ball = self._get_best_target_ball(balls_before, my_targets_before)
@@ -128,27 +186,120 @@ class PoolRLEnv:
         }
         
         # 执行击球
-        step_info = self.env.take_shot(action_dict)
+        if not self.two_ball_mode:
+            step_info = self.env.take_shot(action_dict)
+        else:
+            # simulate simple two-ball shot
+            shot = pt.System(table=self.simple_table, balls=self.simple_balls, cue=self.simple_cue)
+            self.simple_cue.set_state(V0=action_dict['V0'], phi=action_dict['phi'], theta=action_dict['theta'], a=action_dict['a'], b=action_dict['b'])
+            sim_result = self._simulate_two_ball_with_timeout(shot, timeout_s=3.0)
+            if isinstance(sim_result, Exception):
+                # 仿真异常时直接结束本回合，给予惩罚，避免卡死
+                step_info = {
+                    'ME_INTO_POCKET': [],
+                    'ENEMY_INTO_POCKET': [],
+                    'WHITE_BALL_INTO_POCKET': False,
+                    'BLACK_BALL_INTO_POCKET': False,
+                    'FOUL_FIRST_HIT': False,
+                    'NO_POCKET_NO_RAIL': False,
+                    'NO_HIT': True,
+                    'BALLS': {k: v.copy() for k, v in self.simple_balls.items()},
+                    'error': str(sim_result)
+                }
+                return self._get_observation(), -25.0, True, {
+                    'step_info': step_info,
+                    'game_info': {'winner': 'B'},
+                    'agent_player': self.agent_player,
+                    'hit_count': self.hit_count
+                }
+            if sim_result is None:
+                # 超时，直接结束本回合并惩罚
+                step_info = {
+                    'ME_INTO_POCKET': [],
+                    'ENEMY_INTO_POCKET': [],
+                    'WHITE_BALL_INTO_POCKET': False,
+                    'BLACK_BALL_INTO_POCKET': False,
+                    'FOUL_FIRST_HIT': False,
+                    'NO_POCKET_NO_RAIL': False,
+                    'NO_HIT': True,
+                    'BALLS': {k: v.copy() for k, v in self.simple_balls.items()},
+                    'timeout': True
+                }
+                return self._get_observation(), -30.0, True, {
+                    'step_info': step_info,
+                    'game_info': {'winner': 'B'},
+                    'agent_player': self.agent_player,
+                    'hit_count': self.hit_count
+                }
+            shot = sim_result
+
+            self.shot_record.append(copy.deepcopy(shot))
+            self.simple_balls = shot.balls
+
+            new_pocketed = [bid for bid, b in shot.balls.items() if b.state.s == 4 and balls_before[bid].state.s != 4]
+            own_pocketed = [bid for bid in new_pocketed if bid == self.current_target_ball]
+            cue_pocketed = 'cue' in new_pocketed
+
+            # 检测是否命中目标球：检查事件历史中是否有白球与目标球的碰撞
+            target_hit = False
+            if hasattr(shot, 'events') and shot.events is not None:
+                for event in shot.events:
+                    # 检查球球碰撞事件 (event_type='ball_ball')
+                    if hasattr(event, 'event_type') and event.event_type == 'ball_ball':
+                        if hasattr(event, 'agents') and len(event.agents) == 2:
+                            # agents 是 Agent 对象的元组，需要提取 id
+                            ids = [agent.id for agent in event.agents if hasattr(agent, 'id')]
+                            if 'cue' in ids and self.current_target_ball in ids:
+                                target_hit = True
+                                break
+
+            step_info = {
+                'ME_INTO_POCKET': own_pocketed,
+                'ENEMY_INTO_POCKET': [],
+                'WHITE_BALL_INTO_POCKET': cue_pocketed,
+                'BLACK_BALL_INTO_POCKET': False,
+                'FOUL_FIRST_HIT': False,
+                'NO_POCKET_NO_RAIL': False,
+                'NO_HIT': False,
+                'TARGET_HIT': target_hit,
+                'BALLS': {k: v.copy() for k, v in self.simple_balls.items()}
+            }
         
         # 计算奖励
         reward = self._compute_reward(balls_before, my_targets_before, step_info)
         
         # 检查游戏是否结束
-        done, game_info = self.env.get_done()
+        if not self.two_ball_mode:
+            done, game_info = self.env.get_done()
+        else:
+            done = False
+            game_info = {}
+            # end when target pocketed or white pocketed or max hits
+            if len(step_info.get('ME_INTO_POCKET', [])) > 0:
+                done = True
+                game_info['winner'] = self.agent_player
+            elif step_info.get('WHITE_BALL_INTO_POCKET', False):
+                done = True
+                game_info['winner'] = 'B'  # treat as loss
+            else:
+                self.hit_count += 1
+                if self.hit_count >= self.MAX_HIT_COUNT:
+                    done = True
+                    game_info['winner'] = 'SAME'
         
-        if not done:
+        if not done and not self.two_ball_mode:
             # 如果轮到对手,让对手行动
             while self.env.get_curr_player() != self.agent_player:
                 if self._check_done():
                     done = True
                     break
                 self._opponent_step()
-                
-        # 再次检查
-        done, game_info = self.env.get_done()
+
+            # 再次检查
+            done, game_info = self.env.get_done()
         
         # 游戏结束的额外奖励
-        if done:
+        if done and not self.two_ball_mode:
             if game_info.get('winner') == self.agent_player:
                 reward += self.reward_config['win_game']
             elif game_info.get('winner') == 'SAME':
@@ -162,7 +313,7 @@ class PoolRLEnv:
             'step_info': step_info,
             'game_info': game_info,
             'agent_player': self.agent_player,
-            'hit_count': self.env.hit_count
+            'hit_count': self.hit_count if self.two_ball_mode else self.env.hit_count
         }
         
         return obs, reward, done, info
@@ -179,7 +330,12 @@ class PoolRLEnv:
                 - target_mask: [max_balls] 目标球mask
                 - game_state: [4] 游戏状态
         """
-        balls, my_targets, table = self.env.get_observation(self.agent_player)
+        if not self.two_ball_mode:
+            balls, my_targets, table = self.env.get_observation(self.agent_player)
+        else:
+            balls = self.simple_balls
+            my_targets = [self.current_target_ball]
+            table = self.simple_table
         
         # 1. 球特征 [max_balls, 7]
         max_balls = NETWORK_CONFIG['max_balls']
@@ -235,10 +391,15 @@ class PoolRLEnv:
         # 4. 游戏状态 [4]
         own_remaining = len([bid for bid in my_targets if balls[bid].state.s != 4])
         opponent_player = 'B' if self.agent_player == 'A' else 'A'
-        enemy_targets = self.env.player_targets[opponent_player]
-        enemy_remaining = len([bid for bid in enemy_targets if balls[bid].state.s != 4])
+        if not self.two_ball_mode:
+            enemy_targets = self.env.player_targets[opponent_player]
+            enemy_remaining = len([bid for bid in enemy_targets if balls[bid].state.s != 4])
+            hit_count_normalized = self.env.hit_count / self.env.MAX_HIT_COUNT
+        else:
+            enemy_remaining = 0
+            is_targeting_8 = 1.0 if own_remaining == 0 else 0.0
+            hit_count_normalized = float(self.hit_count) / float(self.MAX_HIT_COUNT)
         is_targeting_8 = 1.0 if own_remaining == 0 else 0.0
-        hit_count_normalized = self.env.hit_count / self.env.MAX_HIT_COUNT
         
         game_state = np.array([
             own_remaining / 7.0,
@@ -255,6 +416,38 @@ class PoolRLEnv:
             'target_mask': torch.from_numpy(target_mask).unsqueeze(0).to(device),
             'game_state': torch.from_numpy(game_state).unsqueeze(0).to(device)
         }
+
+    def _simulate_two_ball_with_timeout(self, shot, timeout_s: float = 3.0):
+        """
+        在单杆两球模式下，给物理仿真加超时保护。
+        
+        关键修复: 使用 max_events 限制物理引擎的最大迭代次数,防止无限循环
+        - 两球模式下,正常情况只需要几十个事件
+        - 限制为1000个事件足够处理所有正常情况
+        - 防止极端情况下物理引擎永远不返回
+        
+        返回值:
+            - 成功: 返回 shot 对象
+            - 超时: 返回 None
+            - 异常: 返回 Exception
+        """
+        def run_sim():
+            # 关键: 添加 max_events 限制,防止物理引擎无限循环
+            pt.simulate(shot, inplace=True, max_events=1000)
+            return shot
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(run_sim)
+            try:
+                return future.result(timeout=timeout_s)
+            except concurrent.futures.TimeoutError:
+                print(f"[Simulate][TIMEOUT] 物理仿真超过{timeout_s}秒")
+                future.cancel()
+                return None
+            except Exception as e:
+                print(f"[Simulate][ERROR] 物理仿真异常: {e}")
+                future.cancel()
+                return e
     
     def _get_best_target_ball(self, balls: dict, my_targets: list) -> Optional[str]:
         """
@@ -279,6 +472,124 @@ class PoolRLEnv:
                 
         return best_ball
     
+    def _compute_reward_two_ball_mode(self, balls_before: dict, step_info: dict) -> float:
+        """
+        Phase 1 专用奖励函数 (two_ball_mode)
+        
+        优化的奖励设计:
+        1. 距离改善奖励
+           - 白球→目标球距离减少: clip[-0.2, 0.2], 奖励 delta * w1 (w1=10)
+           - 目标球→最近袋口距离减少: clip[-0.2, 0.2], 奖励 delta * w2 (w2=15)
+        2. 视线/角度奖励
+           - 若白球-目标球-袋口三点近似共线, 给额外奖励 (cos(theta) > 0.95 -> +1~2)
+        3. 动作幅度/速度约束
+           - 过大 V0 加小惩罚, 鼓励合理力度
+           - 完全不动或极小力度加惩罚, 防止"站桩"-0.01
+        """
+        reward = 0  # 小的时间惩罚
+        
+        cue_pocketed = step_info.get('WHITE_BALL_INTO_POCKET', False)
+        own_pocketed = step_info.get('ME_INTO_POCKET', [])
+        target_hit = step_info.get('TARGET_HIT', False)
+        balls_after = step_info.get('BALLS', {})
+        
+        # === 白球进洞惩罚 ===
+        if cue_pocketed:
+            reward += -10.0
+            return reward
+        
+        # === 目标球进洞奖励 ===
+        if len(own_pocketed) > 0:
+            reward += 20.0
+            return reward
+        
+        # === 命中目标球奖励 ===
+        if target_hit:
+            reward += 5.0
+        
+        # === 1. 距离改善奖励 ===
+        target_ball_id = self.current_target_ball
+        if target_ball_id and balls_after and target_ball_id in balls_before and target_ball_id in balls_after:
+            target_before = balls_before[target_ball_id]
+            target_after = balls_after[target_ball_id]
+            
+            # 只有目标球未进袋时才计算
+            if target_before.state.s != 4 and target_after.state.s != 4:
+                table = self.simple_table
+                
+                # 白球位置
+                cue_before_pos = balls_before['cue'].state.rvw[0][:2]
+                cue_after_pos = balls_after['cue'].state.rvw[0][:2]
+                
+                # 目标球位置
+                target_before_pos = target_before.state.rvw[0][:2]
+                target_after_pos = target_after.state.rvw[0][:2]
+                
+                # 1.1 白球→目标球距离改善
+                cue_target_dist_before = np.linalg.norm(cue_before_pos - target_before_pos)
+                cue_target_dist_after = np.linalg.norm(cue_after_pos - target_after_pos)
+                delta_cue_target = cue_target_dist_before - cue_target_dist_after
+                delta_cue_target = np.clip(delta_cue_target, -0.2, 0.2)
+                reward += delta_cue_target * 10.0  # w1 = 10
+                
+                # 1.2 目标球→最近袋口距离改善
+                pocket_dist_before = self._nearest_pocket_dist(target_before_pos, table)
+                pocket_dist_after = self._nearest_pocket_dist(target_after_pos, table)
+                delta_pocket = pocket_dist_before - pocket_dist_after
+                delta_pocket = np.clip(delta_pocket, -0.2, 0.2)
+                reward += delta_pocket * 15.0  # w2 = 15
+                
+                # === 2. 视线/角度奖励 ===
+                # 若白球-目标球-袋口三点近似共线，给予额外奖励
+                # 找到最近的袋口
+                nearest_pocket_pos = None
+                min_pocket_dist = float('inf')
+                for pid in self.pocket_ids:
+                    if pid in table.pockets:
+                        pocket_pos = np.array(table.pockets[pid].center[:2])
+                        dist = np.linalg.norm(target_after_pos - pocket_pos)
+                        if dist < min_pocket_dist:
+                            min_pocket_dist = dist
+                            nearest_pocket_pos = pocket_pos
+                
+                if nearest_pocket_pos is not None:
+                    # 计算 白球→目标球 和 目标球→袋口 的夹角
+                    vec_cue_to_target = target_after_pos - cue_after_pos
+                    vec_target_to_pocket = nearest_pocket_pos - target_after_pos
+                    
+                    # 归一化
+                    norm_ct = np.linalg.norm(vec_cue_to_target)
+                    norm_tp = np.linalg.norm(vec_target_to_pocket)
+                    
+                    if norm_ct > 1e-6 and norm_tp > 1e-6:
+                        vec_cue_to_target /= norm_ct
+                        vec_target_to_pocket /= norm_tp
+                        
+                        # 计算夹角的余弦值
+                        cos_theta = np.dot(vec_cue_to_target, vec_target_to_pocket)
+                        
+                        # 如果三点近似共线 (cos > 0.95), 给予奖励
+                        if cos_theta > 0.95:
+                            # 线性映射: 0.95 -> +1, 1.0 -> +2
+                            angle_reward = 1.0 + (cos_theta - 0.95) * 20.0
+                            reward += angle_reward
+        
+        # === 3. 动作幅度/速度约束 ===
+        # 通过检查击球后白球的速度来判断力度
+        if 'cue' in balls_after:
+            cue_vel = balls_after['cue'].state.rvw[1][:2]
+            cue_speed = np.linalg.norm(cue_vel)
+            
+            # 极小力度惩罚 (几乎不动)
+            if cue_speed < 0.1:
+                reward += -0.5  # 防止"站桩"
+            
+            # 过大力度轻微惩罚 (鼓励合理力度)
+            elif cue_speed > 5.0:
+                reward += -0.2
+        
+        return reward
+    
     def _compute_reward(self, balls_before: dict, my_targets_before: list, 
                         step_info: dict) -> float:
         """
@@ -290,6 +601,10 @@ class PoolRLEnv:
         3. 严厉惩罚提前打进黑球
         4. 惩罚各种犯规行为
         """
+        # Phase 1 两球模式使用专用奖励函数
+        if self.two_ball_mode:
+            return self._compute_reward_two_ball_mode(balls_before, step_info)
+        
         reward = self.reward_config['step_penalty']  # 基础时间惩罚
         
         # 获取进袋信息
@@ -361,7 +676,7 @@ class PoolRLEnv:
         if target_ball and balls_after:
             if (target_ball in balls_before and target_ball in balls_after and
                     balls_before[target_ball].state.s != 4 and balls_after[target_ball].state.s != 4):
-                table = self.env.table
+                table = self.simple_table if self.two_ball_mode else self.env.table
                 before_pos = balls_before[target_ball].state.rvw[0][:2]
                 after_pos = balls_after[target_ball].state.rvw[0][:2]
 
@@ -386,10 +701,10 @@ class PoolRLEnv:
         """
         cue_pos = balls_after['cue'].state.rvw[0][:2]
         
-        remaining = [bid for bid in my_targets if balls_after[bid].state.s != 4]
+        remaining = [bid for bid in my_targets if bid in balls_after and balls_after[bid].state.s != 4]
         if len(remaining) == 0:
-            # 检查8号球位置
-            if balls_after['8'].state.s != 4:
+            # 检查8号球位置 (only if exists)
+            if '8' in balls_after and balls_after['8'].state.s != 4:
                 target_pos = balls_after['8'].state.rvw[0][:2]
                 dist = np.linalg.norm(cue_pos - target_pos)
                 # 距离越近越好

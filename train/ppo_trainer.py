@@ -16,6 +16,7 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 import os
 import time
+import concurrent.futures
 from collections import deque
 from datetime import datetime
 
@@ -202,7 +203,41 @@ class PPOTrainer:
                 action, log_prob, value, _ = self.policy.get_action(obs_device)
                 
             action_np = action.cpu().numpy()
-            next_obs, rewards, dones, infos = self.envs.step(action_np)
+            
+            # 环境步进超时保护 (增加诊断信息)
+            step_start_time = time.time()
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    future = ex.submit(self.envs.step, action_np)
+                    next_obs, rewards, dones, infos = future.result(timeout=5.0)  # 增加到5秒
+                step_elapsed = time.time() - step_start_time
+                
+                # 监控慢步骤
+                if step_elapsed > 1.5:
+                    print(f"[Rollout][SLOW] 迭代 {iteration_label:04d} | 回合 {step + 1:03d}/{n_steps:03d} 耗时 {step_elapsed:.2f}秒")
+                    
+            except concurrent.futures.TimeoutError:
+                elapsed = time.time() - step_start_time
+                print(f"[Rollout][TIMEOUT] 迭代 {iteration_label:04d} | 回合 {step + 1:03d}/{n_steps:03d} 超过5秒 (实际{elapsed:.1f}s)，跳过本回合并重置环境")
+                try:
+                    obs = self.envs.reset()
+                except Exception as reset_err:
+                    print(f"[Rollout][CRITICAL] 重置失败: {reset_err}, 尝试重建环境")
+                    # 重建环境
+                    from train.pool_rl_env import VectorPoolEnv
+                    self.envs = VectorPoolEnv(
+                        num_envs=self.num_envs,
+                        device=self.device,
+                        opponent_type='random',
+                        enable_noise=True,
+                        two_ball_mode=True
+                    )
+                    obs = self.envs.reset()
+                continue
+            except Exception as e:
+                print(f"[Rollout][ERROR] 迭代 {iteration_label:04d} | 回合 {step + 1:03d}/{n_steps:03d} 环境步进异常: {type(e).__name__}: {e}")
+                obs = self.envs.reset()
+                continue
             step_reward_sum = float(np.sum(rewards))
             iteration_reward_accum += step_reward_sum
             step_label = step + 1
@@ -320,7 +355,7 @@ class PPOTrainer:
             'entropy': entropy_sum / n_updates
         }
     
-    #每迭代一次，打128个回合（对所有的env）收集数据，用最后一步计算价值
+    #每迭代一次，打256个回合（对所有的env）收集数据，用最后一步计算价值；对于200_0000步，总共迭代1000次
     def train(self, total_timesteps: int = None):
         """主训练循环"""
         if total_timesteps is None:
@@ -365,7 +400,7 @@ class PPOTrainer:
                 self.log_file.write(log_msg + '\n')
                 self.log_file.flush()
                 
-            # 保存检查点
+            # 保存检查点（每25个迭代）
             if (iteration + 1) % (self.train_config['save_freq'] // self.config['update_freq']) == 0:
                 self.save_checkpoint(f'checkpoint_{self.total_timesteps}.pt')
                 
