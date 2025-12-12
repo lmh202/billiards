@@ -129,12 +129,15 @@ class PPOTrainer:
                  config: dict = PPO_CONFIG,
                  train_config: dict = TRAIN_CONFIG,
                  network_config: dict = NETWORK_CONFIG,
-                 device: str = None):
+                 device: str = None,
+                 opponent_type: str = 'self',
+                 enable_noise: bool = True):
         
         self.config = config
         self.train_config = train_config
         self.network_config = network_config
         self.device = device if device else DEVICE
+        self.opponent_type = opponent_type
         
         # 创建网络
         self.policy = PPOActorCritic(network_config).to(self.device)
@@ -151,12 +154,13 @@ class PPOTrainer:
         self.envs = VectorPoolEnv(
             num_envs=self.num_envs,
             device=self.device,
-            opponent_type='self',
-            enable_noise=True
+            opponent_type=self.opponent_type,
+            enable_noise=enable_noise
         )
         
         # 设置自我对弈
-        self.envs.set_opponent_policy(self.policy)
+        if self.opponent_type == 'self':
+            self.envs.set_opponent_policy(self.policy)
         
         # 创建缓冲区
         self.buffer = RolloutBuffer(
@@ -192,7 +196,7 @@ class PPOTrainer:
         iteration_reward_accum = 0.0
         iteration_label = (iteration_idx + 1) if iteration_idx is not None else (self.total_timesteps // self.config['update_freq']) + 1
         
-        for step in range(n_steps):
+        for step in range(n_steps): #256
             with torch.no_grad():
                 obs_device = {k: v.to(self.device) for k, v in obs.items()}
                 action, log_prob, value, _ = self.policy.get_action(obs_device)
@@ -238,6 +242,7 @@ class PPOTrainer:
             self.total_timesteps += self.num_envs
             
         # 计算最后一步的价值用于GAE
+        print("计算最后一步的价值用于GAE")
         with torch.no_grad():
             obs_device = {k: v.to(self.device) for k, v in obs.items()}
             last_values = self.policy.get_value(obs_device)
@@ -315,13 +320,14 @@ class PPOTrainer:
             'entropy': entropy_sum / n_updates
         }
     
+    #每迭代一次，打128个回合（对所有的env）收集数据，用最后一步计算价值
     def train(self, total_timesteps: int = None):
         """主训练循环"""
         if total_timesteps is None:
             total_timesteps = self.train_config['total_timesteps']
             
-        n_steps = self.config['update_freq'] // self.num_envs
-        n_iterations = total_timesteps // self.config['update_freq']
+        n_steps = self.config['update_freq'] // self.num_envs #256
+        n_iterations = total_timesteps // self.config['update_freq']#1000
         
         print(f"开始训练 - 设备: {self.device}")
         print(f"总步数: {total_timesteps}, 迭代次数: {n_iterations}")

@@ -480,6 +480,7 @@ class NewAgent(Agent):
         try:
             # 获取观测
             obs = self._get_observation(balls, my_targets, table)
+            print(f"[NewAgent] 正在为 Player (targets: {my_targets}) 搜索最佳击球...")
             
             # 使用策略网络决策
             with torch.no_grad():

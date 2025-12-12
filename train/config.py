@@ -56,9 +56,9 @@ TRAIN_CONFIG = {
     'total_timesteps': 2_000_000,     # 总训练步数
     'num_envs': 8,                    # 并行环境数量
     # 下列频率均为update_freq(2048)的整数倍，避免训练循环取整后为0
-    'log_freq': 20_480,               # 10个迭代记录一次（约1万步）
-    'eval_freq': 102_400,             # 50个迭代评估一次
-    'save_freq': 204_800,             # 100个迭代保存一次
+    'log_freq': 10_240,               # 5个迭代记录一次（约5k步）
+    'eval_freq': 51_200,             # 25个迭代评估一次
+    'save_freq': 51_200,             # 25个迭代保存一次
     'eval_episodes': 20,              # 评估局数
     'checkpoint_dir': './train/checkpoints',  # 检查点目录
     'log_dir': './train/logs',        # 日志目录
@@ -67,30 +67,32 @@ TRAIN_CONFIG = {
 # ============ 奖励配置 ============
 REWARD_CONFIG = {
     # 基础奖励
-    'own_ball_pocketed': 100.0,             # 打进己方目标球
-    'own_ball_pocketed_bonus_targeted': 50.0,  # 打进当前瞄准的球额外奖励
-    'legal_eight_pocketed': 500.0,          # 合法打进8号球(获胜)
+    'own_ball_pocketed': 120.0,             # 打进己方目标球
+    'own_ball_pocketed_bonus_targeted': 60.0,  # 打进当前瞄准的球额外奖励
+    'legal_eight_pocketed': 520.0,          # 合法打进8号球(获胜)
     
     # 惩罚
     'cue_pocketed': -150.0,                 # 白球进袋
     'illegal_eight_pocketed': -1000.0,      # 非法打进8号球(直接判负)
     'cue_and_eight_pocketed': -1000.0,      # 白球和8号球同时进袋
-    'enemy_ball_pocketed': -30.0,           # 打进对方球(轻微惩罚)
-    'foul_first_hit': -50.0,                # 首球犯规
-    'no_rail_foul': -50.0,                  # 未碰库犯规
-    'no_hit_foul': -80.0,                   # 未击中任何球
+    'enemy_ball_pocketed': -15.0,           # 打进对方球(轻微惩罚)
+    'foul_first_hit': -40.0,                # 首球犯规
+    'no_rail_foul': -40.0,                  # 未碰库犯规
+    'no_hit_foul': -70.0,                   # 未击中任何球
     
     # 形势奖励/惩罚
-    'good_position': 10.0,                  # 好的走位(白球与下一目标球距离近)
-    'continue_shot': 20.0,                  # 连续击球权奖励
-    'lose_turn': -5.0,                      # 失去击球权
+    'good_position': 12.0,                  # 好的走位(白球与下一目标球距离近)
+    'continue_shot': 25.0,                  # 连续击球权奖励
+    'lose_turn': -1.0,                      # 失去击球权
+    'pocket_progress_weight': 30.0,         # 目标球最紧口袋距离的改善提示
+    'cue_target_align_weight': 6.0,         # 白球距目标球的改善提示
     
     # 游戏结束奖励
     'win_game': 200.0,                      # 赢得比赛额外奖励
     'lose_game': -200.0,                    # 输掉比赛额外惩罚
     
     # 时间惩罚(鼓励快速结束)
-    'step_penalty': -1.0,                   # 每步小惩罚
+    'step_penalty': -0.2,                   # 每步小惩罚
 }
 
 # ============ 动作空间边界 ============

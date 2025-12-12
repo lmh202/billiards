@@ -49,6 +49,7 @@ class PoolRLEnv:
         self.opponent_type = opponent_type
         self.reward_config = reward_config
         self.device = device
+        self.basic_agent = None
         
         # 球ID映射
         self.ball_ids = ['cue'] + [str(i) for i in range(1, 16)]  # 16个球
@@ -296,6 +297,7 @@ class PoolRLEnv:
         enemy_pocketed = step_info.get('ENEMY_INTO_POCKET', [])
         cue_pocketed = step_info.get('WHITE_BALL_INTO_POCKET', False)
         eight_pocketed = step_info.get('BLACK_BALL_INTO_POCKET', False)
+        balls_after = step_info.get('BALLS', {})
         
         # 检查是否应该瞄准8号球
         remaining_before = [bid for bid in my_targets_before if balls_before[bid].state.s != 4]
@@ -350,11 +352,30 @@ class PoolRLEnv:
             reward += self.reward_config['lose_turn']
             
         # === 走位奖励 (如果有连续击球权) ===
-        if len(own_pocketed) > 0 and not cue_pocketed:
-            balls_after = step_info.get('BALLS', {})
-            if balls_after:
-                position_reward = self._compute_position_reward(balls_after, my_targets_before)
-                reward += position_reward
+        if len(own_pocketed) > 0 and not cue_pocketed and balls_after:
+            position_reward = self._compute_position_reward(balls_after, my_targets_before)
+            reward += position_reward
+
+        # === 稠密引导: 目标球靠近袋口 + 白球靠近目标球 ===
+        target_ball = self.current_target_ball or self._get_best_target_ball(balls_before, my_targets_before)
+        if target_ball and balls_after:
+            if (target_ball in balls_before and target_ball in balls_after and
+                    balls_before[target_ball].state.s != 4 and balls_after[target_ball].state.s != 4):
+                table = self.env.table
+                before_pos = balls_before[target_ball].state.rvw[0][:2]
+                after_pos = balls_after[target_ball].state.rvw[0][:2]
+
+                before_pocket = self._nearest_pocket_dist(before_pos, table)
+                after_pocket = self._nearest_pocket_dist(after_pos, table)
+                progress = np.clip(before_pocket - after_pocket, -1.0, 1.0)
+                reward += progress * self.reward_config.get('pocket_progress_weight', 0.0)
+
+                cue_before = balls_before['cue'].state.rvw[0][:2]
+                cue_after = balls_after['cue'].state.rvw[0][:2]
+                cue_target_before = np.linalg.norm(cue_before - before_pos)
+                cue_target_after = np.linalg.norm(cue_after - after_pos)
+                cue_progress = np.clip(cue_target_before - cue_target_after, -1.0, 1.0)
+                reward += cue_progress * self.reward_config.get('cue_target_align_weight', 0.0)
                 
         return reward
     
@@ -390,6 +411,15 @@ class PoolRLEnv:
             return self.reward_config['good_position'] * 0.5
             
         return 0.0
+
+    def _nearest_pocket_dist(self, pos: np.ndarray, table) -> float:
+        """计算某球到最近袋口的距离"""
+        dists = []
+        for pid in self.pocket_ids:
+            if pid in table.pockets:
+                pocket_pos = np.array(table.pockets[pid].center[:2])
+                dists.append(np.linalg.norm(pos - pocket_pos))
+        return min(dists) if dists else 0.0
     
     def _opponent_step(self):
         """对手执行一步"""
@@ -401,17 +431,39 @@ class PoolRLEnv:
             with torch.no_grad():
                 action, _, _, _ = self.opponent_policy.get_action(obs, deterministic=False)
                 action = action.cpu().numpy().squeeze()
+        elif self.opponent_type == 'basic':
+            if self.basic_agent is None:
+                from agent import BasicAgent
+                self.basic_agent = BasicAgent()
+            opponent_player = 'B' if self.agent_player == 'A' else 'A'
+            action = self.basic_agent.decision(
+                balls=self.env.balls,
+                my_targets=self.env.player_targets[opponent_player],
+                table=self.env.table
+            )
         else:
             # 默认随机
             action = self._random_action()
+        
+        if action is None:
+            action = self._random_action()
             
-        action_dict = {
-            'V0': float(action[0]),
-            'phi': float(action[1]),
-            'theta': float(action[2]),
-            'a': float(action[3]),
-            'b': float(action[4])
-        }
+        if isinstance(action, dict):
+            action_dict = {
+                'V0': float(action['V0']),
+                'phi': float(action['phi']),
+                'theta': float(action['theta']),
+                'a': float(action['a']),
+                'b': float(action['b'])
+            }
+        else:
+            action_dict = {
+                'V0': float(action[0]),
+                'phi': float(action[1]),
+                'theta': float(action[2]),
+                'a': float(action[3]),
+                'b': float(action[4])
+            }
         self.env.take_shot(action_dict)
         
     def _get_opponent_observation(self) -> Dict[str, torch.Tensor]:
