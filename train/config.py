@@ -43,23 +43,23 @@ PPO_CONFIG = {
     'gamma': 0.99,                  # 折扣因子
     'gae_lambda': 0.95,             # GAE参数
     'clip_epsilon': 0.2,            # PPO裁剪系数
-    'entropy_coef': 0.01,           # 熵正则化系数
+    'entropy_coef': 0.02,           # 熵正则化系数 (从0.01提高到0.02,增加探索)
     'value_loss_coef': 0.5,         # 价值损失系数
     'max_grad_norm': 0.5,           # 梯度裁剪
     'ppo_epochs': 10,               # 每次更新的PPO迭代次数
     'mini_batch_size': 64,          # 小批量大小
-    'update_freq': 512,            # 更新频率(收集多少步后更新)
+    'update_freq': 2048,            # 更新频率 (从512改为2048,收集更多经验再更新)
 }
 
 # ============ 训练配置 ============
 TRAIN_CONFIG = {
     'total_timesteps': 2_000_000,     # 总训练步数
-    'num_envs': 1,                    # 并行环境数量
+    'num_envs': 4,                    # 并行环境数量 (从1改为4,提高样本效率)
     # 下列频率均为update_freq(512)的整数倍，避免训练循环取整后为0
-    'log_freq': 2560,               # 5个迭代记录一次（约5k步）
-    'eval_freq': 12800,             # 25个迭代评估一次
-    'save_freq': 12800,             # 25个迭代保存一次
-    'eval_episodes': 40,              # 评估局数
+    'log_freq': 10240,               # 5个迭代记录一次（约5k步）
+    'eval_freq': 51200,             # 25个迭代评估一次
+    'save_freq': 51200,             # 25个迭代保存一次
+    'eval_episodes': 5,              # 评估局数
     'checkpoint_dir': './train/checkpoints',  # 检查点目录
     'log_dir': './train/logs',        # 日志目录
 }

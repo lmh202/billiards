@@ -371,6 +371,8 @@ class PPOTrainer:
         start_time = time.time()
         
         for iteration in range(n_iterations):
+            print(total_timesteps)
+            print(self.config['update_freq'])
             # 收集经验
             self.collect_rollouts(n_steps, iteration_idx=iteration)
             
@@ -401,11 +403,11 @@ class PPOTrainer:
                 self.log_file.flush()
                 
             # 保存检查点（每25个迭代）
-            if (iteration + 1) % (self.train_config['save_freq'] // self.config['update_freq']) == 0:
+            if (iteration + 1) % (4 * self.train_config['save_freq'] // self.config['update_freq']) == 0:
                 self.save_checkpoint(f'checkpoint_{self.total_timesteps}.pt')
                 
             # 评估
-            if (iteration + 1) % (self.train_config['eval_freq'] // self.config['update_freq']) == 0:
+            if (iteration + 1) % (4 * self.train_config['eval_freq'] // self.config['update_freq']) == 0:
                 eval_results = self.evaluate()
                 eval_msg = f"[评估] 胜率: {eval_results['win_rate']:.2%}, 平均奖励: {eval_results['avg_reward']:.2f}"
                 print(eval_msg)
@@ -424,7 +426,7 @@ class PPOTrainer:
             
         self.policy.eval()
         
-        eval_env = PoolRLEnv(opponent_type='random', enable_noise=True)
+        eval_env = PoolRLEnv(opponent_type='basic', enable_noise=True)
         
         total_rewards = []
         wins = 0

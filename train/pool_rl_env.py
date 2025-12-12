@@ -474,19 +474,14 @@ class PoolRLEnv:
     
     def _compute_reward_two_ball_mode(self, balls_before: dict, step_info: dict) -> float:
         """
-        Phase 1 专用奖励函数 (two_ball_mode)
+        Phase 1 专用奖励函数 (two_ball_mode) - 优化版
         
-        优化的奖励设计:
-        1. 距离改善奖励
-           - 白球→目标球距离减少: clip[-0.2, 0.2], 奖励 delta * w1 (w1=10)
-           - 目标球→最近袋口距离减少: clip[-0.2, 0.2], 奖励 delta * w2 (w2=15)
-        2. 视线/角度奖励
-           - 若白球-目标球-袋口三点近似共线, 给额外奖励 (cos(theta) > 0.95 -> +1~2)
-        3. 动作幅度/速度约束
-           - 过大 V0 加小惩罚, 鼓励合理力度
-           - 完全不动或极小力度加惩罚, 防止"站桩"-0.01
+        设计原则:
+        1. 稀疏奖励为主: 进洞+20, 白球进洞-10, 命中+5
+        2. 稠密引导为辅: 距离改善给予适度奖励,避免过度惩罚
+        3. 鼓励探索: 不要对角度偏差过度惩罚,只奖励好的角度
         """
-        reward = 0  # 小的时间惩罚
+        reward = -0.01  # 小的时间惩罚,鼓励快速完成
         
         cue_pocketed = step_info.get('WHITE_BALL_INTO_POCKET', False)
         own_pocketed = step_info.get('ME_INTO_POCKET', [])
@@ -498,16 +493,16 @@ class PoolRLEnv:
             reward += -10.0
             return reward
         
-        # === 目标球进洞奖励 ===
+        # === 目标球进洞奖励 (最重要!) ===
         if len(own_pocketed) > 0:
-            reward += 20.0
+            reward += 50.0  # 增加到50,让进球成为主要目标
             return reward
         
         # === 命中目标球奖励 ===
         if target_hit:
             reward += 5.0
         
-        # === 1. 距离改善奖励 ===
+        # === 1. 距离改善奖励 (稠密引导) ===
         target_ball_id = self.current_target_ball
         if target_ball_id and balls_after and target_ball_id in balls_before and target_ball_id in balls_after:
             target_before = balls_before[target_ball_id]
@@ -525,22 +520,23 @@ class PoolRLEnv:
                 target_before_pos = target_before.state.rvw[0][:2]
                 target_after_pos = target_after.state.rvw[0][:2]
                 
-                # 1.1 白球→目标球距离改善
-                cue_target_dist_before = np.linalg.norm(cue_before_pos - target_before_pos)
-                cue_target_dist_after = np.linalg.norm(cue_after_pos - target_after_pos)
-                delta_cue_target = cue_target_dist_before - cue_target_dist_after
-                delta_cue_target = np.clip(delta_cue_target, -0.2, 0.2)
-                reward += delta_cue_target * 10.0  # w1 = 10
+                # 1.1 白球→目标球距离改善 (只有未命中时才鼓励靠近)
+                if not target_hit:
+                    cue_target_dist_before = np.linalg.norm(cue_before_pos - target_before_pos)
+                    cue_target_dist_after = np.linalg.norm(cue_after_pos - target_after_pos)
+                    delta_cue_target = cue_target_dist_before - cue_target_dist_after
+                    # 放宽clip限制,让距离改善更明显
+                    delta_cue_target = np.clip(delta_cue_target, -0.5, 0.5)
+                    reward += delta_cue_target * 5.0  # 降低权重
                 
                 # 1.2 目标球→最近袋口距离改善
                 pocket_dist_before = self._nearest_pocket_dist(target_before_pos, table)
                 pocket_dist_after = self._nearest_pocket_dist(target_after_pos, table)
                 delta_pocket = pocket_dist_before - pocket_dist_after
-                delta_pocket = np.clip(delta_pocket, -0.2, 0.2)
-                reward += delta_pocket * 15.0  # w2 = 15
+                delta_pocket = np.clip(delta_pocket, -0.5, 0.5)
+                reward += delta_pocket * 8.0  # 适度降低权重
                 
-                # === 2. 视线/角度奖励 ===
-                # 若白球-目标球-袋口三点近似共线，给予额外奖励
+                # === 2. 视线/角度奖励 (只奖励不惩罚!) ===
                 # 找到最近的袋口
                 nearest_pocket_pos = None
                 min_pocket_dist = float('inf')
@@ -568,25 +564,26 @@ class PoolRLEnv:
                         # 计算夹角的余弦值
                         cos_theta = np.dot(vec_cue_to_target, vec_target_to_pocket)
                         
-                        # 如果三点近似共线 (cos > 0.95), 给予奖励
-                        if cos_theta > 0.95:
-                            # 线性映射: 0.95 -> +1, 1.0 -> +2
-                            angle_reward = 1.0 + (cos_theta - 0.95) * 20.0
+                        # 关键修改: 只在角度很好时给奖励,不好也不惩罚!
+                        if cos_theta > 0.95:  # 18度以内
+                            angle_reward = 1.0 + (cos_theta - 0.95) * 20.0  # +1 到 +2
                             reward += angle_reward
+                        elif cos_theta > 0.85:  # 18-31度, 给一点奖励
+                            reward += 0.5
+                        # 角度不好就不给奖励,但也不惩罚!
         
         # === 3. 动作幅度/速度约束 ===
-        # 通过检查击球后白球的速度来判断力度
         if 'cue' in balls_after:
             cue_vel = balls_after['cue'].state.rvw[1][:2]
             cue_speed = np.linalg.norm(cue_vel)
             
             # 极小力度惩罚 (几乎不动)
             if cue_speed < 0.1:
-                reward += -0.5  # 防止"站桩"
+                reward += -1.0  # 增加惩罚,防止"站桩"
             
-            # 过大力度轻微惩罚 (鼓励合理力度)
-            elif cue_speed > 5.0:
-                reward += -0.2
+            # 过大力度轻微惩罚
+            elif cue_speed > 6.0:  # 提高阈值到6
+                reward += -0.5
         
         return reward
     

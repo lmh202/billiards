@@ -31,7 +31,7 @@ if __name__ == '__main__':
     )
 
     # adjust training length for phase-1 (shorter by default)
-    total_timesteps = 200_000
+    total_timesteps = 5_000_000
     print(f"Starting phase-1 pretraining for {total_timesteps} timesteps on two-ball env")
     trainer.train(total_timesteps=total_timesteps)
 
