@@ -169,7 +169,7 @@ if __name__ == '__main__':
     parser.add_argument('--n_expert_games', type=int, default=200, help='专家数据收集局数')
     
     # BC参数
-    parser.add_argument('--bc_epochs', type=int, default=200, help='BC训练轮数')
+    parser.add_argument('--bc_epochs', type=int, default=500, help='BC训练轮数')
     parser.add_argument('--bc_lr', type=float, default=1e-3, help='BC学习率')
     
     # DAgger参数
@@ -181,7 +181,7 @@ if __name__ == '__main__':
     parser.add_argument('--ppo_lr', type=float, default=3e-4, help='PPO学习率')
     
     # 通用参数
-    parser.add_argument('--hidden_dim', type=int, default=256, help='隐藏层维度')
+    parser.add_argument('--hidden_dim', type=int, default=768, help='隐藏层维度')
     parser.add_argument('--output_dir', type=str, default='train/checkpoints', help='输出目录')
     
     args = parser.parse_args()

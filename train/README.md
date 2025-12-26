@@ -32,19 +32,19 @@ python train/train.py --mode full
 
 ```bash
 python train/train.py --mode full \
-    --n_expert_games 200 \    # 专家数据收集局数
-    --bc_epochs 200 \         # BC训练轮数
-    --dagger_iters 3 \        # DAgger迭代次数
-    --ppo_games 2000 \        # PPO训练局数
-    --hidden_dim 256 \        # 网络隐藏层维度
-    --output_dir train/checkpoints
+  --n_expert_games 200 \    # 专家数据收集局数
+  --bc_epochs 300 \         # BC训练轮数（增大以充分拟合专家）
+  --dagger_iters 3 \        # DAgger迭代次数
+  --ppo_games 2000 \        # PPO训练局数
+  --hidden_dim 384 \        # 更大的网络容量
+  --output_dir train/checkpoints
 ```
 
 ### 分阶段训练
 
 1. **仅收集数据和BC训练**:
 ```bash
-python train/train.py --mode bc_only --n_expert_games 100 --bc_epochs 100
+python train/train.py --mode bc_only --n_expert_games 100 --bc_epochs 200
 ```
 
 2. **仅PPO微调**（需要先有BC模型）:
@@ -59,7 +59,7 @@ python train/train.py --mode ppo_only --ppo_games 1000
 python train/collect_data.py --n_games 200 --save_path train/expert_data.npz
 
 # 2. BC训练
-python train/train_bc.py --data_path train/expert_data.npz --n_epochs 200
+python train/train_bc.py --data_path train/expert_data.npz --n_epochs 300 --batch_size 128 --lr 3e-4 --hidden_dim 384
 
 # 3. BC + DAgger
 python train/train_bc.py --data_path train/expert_data.npz --dagger --dagger_iters 5
@@ -70,10 +70,11 @@ python train/train_ppo.py --bc_model train/bc_model_best.pt --n_games 2000
 
 ## 超参数设置
 
-### BC阶段
-- 学习率: 1e-3
-- 批次大小: 64
-- 训练轮数: 200
+### BC阶段（强化版）
+- 学习率: 3e-4（更稳定收敛）
+- 批次大小: 128
+- 训练轮数: 300
+- 网络宽度: hidden_dim=384
 - 角度表示: 使用 sin(phi), cos(phi) 处理周期性
 
 ### DAgger阶段

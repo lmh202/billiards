@@ -29,14 +29,15 @@ from state_utils import (
 class BCTrainer:
     """行为克隆训练器"""
     
-    def __init__(self, hidden_dim: int = 256, lr: float = 1e-3, device: str = None):
+    def __init__(self, hidden_dim: int = 384, lr: float = 3e-4, device: str = None):
         self.device = torch.device(device if device else ('cuda' if torch.cuda.is_available() else 'cpu'))
         print(f"[BCTrainer] 使用设备: {self.device}")
         
         self.model = BCPolicyNetwork(hidden_dim=hidden_dim).to(self.device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay=1e-5)
+        # 去掉过强的正则、降低学习率，提升拟合能力
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=10, verbose=True
+            self.optimizer, mode='min', factor=0.5, patience=5, verbose=True
         )
         
         # 损失函数
@@ -68,6 +69,8 @@ class BCTrainer:
         target_angle_norm = target_angle / (target_angle.norm(dim=1, keepdim=True) + 1e-8)
         # 角度损失 = 1 - cos_similarity
         angle_loss = 1 - (pred_angle_norm * target_angle_norm).sum(dim=1).mean()
+        # 同时加入L2以稳定收敛
+        angle_l2 = self.mse_loss(pred_angle_norm, target_angle_norm)
         
         # theta损失
         theta_loss = self.mse_loss(pred[:, 3], target[:, 3])
@@ -76,7 +79,13 @@ class BCTrainer:
         ab_loss = self.mse_loss(pred[:, 4:], target[:, 4:])
         
         # 总损失 (加权)
-        total_loss = v0_loss * 1.0 + angle_loss * 2.0 + theta_loss * 0.5 + ab_loss * 0.5
+        total_loss = (
+            v0_loss * 1.0
+            + angle_loss * 3.0
+            + angle_l2 * 1.0
+            + theta_loss * 1.0
+            + ab_loss * 0.5
+        )
         
         loss_dict = {
             'v0_loss': v0_loss.item(),
@@ -131,7 +140,7 @@ class BCTrainer:
         
         return epoch_losses
     
-    def train(self, dataset: BCDataset, n_epochs: int = 100, batch_size: int = 64,
+    def train(self, dataset: BCDataset, n_epochs: int = 300, batch_size: int = 128,
               save_path: str = 'bc_model.pt', save_freq: int = 20):
         """训练模型"""
         print(f"[BCTrainer] 开始训练，数据量: {len(dataset)}, epochs: {n_epochs}")
@@ -252,11 +261,11 @@ def run_dagger(bc_trainer: BCTrainer, dataset: BCDataset,
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='BC训练')
-    parser.add_argument('--data_path', type=str, default='train/expert_data.npz', help='数据路径')
-    parser.add_argument('--n_epochs', type=int, default=200, help='训练轮数')
-    parser.add_argument('--batch_size', type=int, default=64, help='批次大小')
-    parser.add_argument('--lr', type=float, default=1e-3, help='学习率')
-    parser.add_argument('--hidden_dim', type=int, default=256, help='隐藏层维度')
+    parser.add_argument('--data_path', type=str, default='train/checkpoints/expert_data.npz', help='数据路径')
+    parser.add_argument('--n_epochs', type=int, default=1600, help='训练轮数')
+    parser.add_argument('--batch_size', type=int, default=512, help='批次大小')
+    parser.add_argument('--lr', type=float, default=3e-4, help='学习率')
+    parser.add_argument('--hidden_dim', type=int, default=768, help='隐藏层维度')
     parser.add_argument('--save_path', type=str, default='train/bc_model.pt', help='模型保存路径')
     parser.add_argument('--dagger', action='store_true', help='是否使用DAgger')
     parser.add_argument('--dagger_iters', type=int, default=5, help='DAgger迭代次数')

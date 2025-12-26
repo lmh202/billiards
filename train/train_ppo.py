@@ -541,14 +541,14 @@ def train_ppo(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='PPO自博弈训练')
-    parser.add_argument('--bc_model', type=str, default='train/bc_model_best.pt', help='BC模型路径')
+    parser.add_argument('--bc_model', type=str, default='train/bc_model.pt', help='BC模型路径')
     parser.add_argument('--n_games', type=int, default=1000, help='训练局数')
     parser.add_argument('--update_freq', type=int, default=10, help='更新频率')
     parser.add_argument('--batch_size', type=int, default=64, help='批次大小')
     parser.add_argument('--n_epochs', type=int, default=10, help='PPO epochs')
     parser.add_argument('--save_freq', type=int, default=100, help='保存频率')
     parser.add_argument('--save_path', type=str, default='train/ppo_model.pt', help='保存路径')
-    parser.add_argument('--hidden_dim', type=int, default=256, help='隐藏层维度')
+    parser.add_argument('--hidden_dim', type=int, default=768, help='隐藏层维度')
     parser.add_argument('--lr', type=float, default=3e-4, help='学习率')
     
     args = parser.parse_args()
