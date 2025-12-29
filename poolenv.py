@@ -507,7 +507,7 @@ if __name__ == '__main__':
     # 初始化任务环境
     env = PoolEnv()
 
-    agent_a, agent_b = BasicAgent(), NewAgent()
+    agent_a, agent_b = BasicAgentPro(), NewAgent()
 
     env.reset(target_ball='solid') # 指定player_a打什么球
     while True:
@@ -531,6 +531,6 @@ if __name__ == '__main__':
             #     pt.show(env.shot_record[i], title=f"hit count: {i}")
             
             ## 观看整个过程 使用 p 和 n 控制 上一杆/ 下一杆
-            # pt.show(env.shot_record, title=f"all record")
+            pt.show(env.shot_record, title=f"all record")
             break
         
